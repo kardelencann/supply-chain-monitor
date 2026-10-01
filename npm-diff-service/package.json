@@ -1,0 +1,22 @@
+{
+  "name": "npm-diff-service",
+  "version": "1.0.0",
+  "description": "Express service that diffs two npm package versions and flags suspicious changes",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "diff": "^9.0.0",
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1",
+    "pacote": "^21.5.1"
+  },
+  "engines": {
+    "node": "^20.17.0 || >=22.9.0"
+  }
+}
