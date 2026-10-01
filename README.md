@@ -3,8 +3,6 @@
 An automated monitoring system that detects signs of supply chain attacks in tracked npm packages. It compares each new release against a stored "baseline" version, scans for suspicious changes using rule-based heuristics, has an LLM (DeepSeek) evaluate the code diff, stores the findings in PostgreSQL and sends alerts via Telegram.
 
 > This project was developed during my internship.
->
-> 🚧 **Status:** The source code is being cleaned up and will be added to this repository soon.
 
 ---
 
@@ -50,14 +48,15 @@ The system has two components:
 - Sends a summary alert to Telegram and updates the baseline to the new version.
 - If any step fails, the error is recorded in the `failed_scans` table and reported through a separate Telegram bot.
 
-### 2. Diff service (`server.js`)
+### 2. Diff service (`npm-diff-service/`)
 An Express service that downloads two versions of an npm package and compares them.
 
 - Downloads and extracts packages with `pacote`. Install scripts are **never executed**.
-- Finds added, removed and changed files and produces unified diffs for text files. For files larger than 50,000 characters no full diff is generated, but they are still scanned for suspicious patterns.
+- Finds added, removed and changed files and produces unified diffs for text files. Diffs larger than 50,000 characters are not returned inline; they are written to a size-capped temporary store and referenced by a `diff_id`. Every changed file is still scanned for suspicious patterns.
 - Identifies binary files by their magic numbers (PE, ELF, Mach-O, ZIP…) and scans the printable strings extracted from them.
 - Scans all text and binary content for suspicious patterns: remote download commands, raw IP or Tor addresses, shell references, Discord/Telegram webhooks.
 - Analyzes install script and dependency changes in `package.json`.
+- Collects every finding into a single `security_signals` list so the workflow and the LLM get a compact summary.
 
 **Security measures:**
 - Authentication with an `x-api-key` header, compared in a timing-safe way.
@@ -70,7 +69,7 @@ An Express service that downloads two versions of an npm package and compares th
 ## Setup
 
 ### Requirements
-- Node.js 18+
+- Node.js 20.17+ (required by `pacote`)
 - PostgreSQL
 - n8n (self-hosted)
 - DeepSeek API key
@@ -79,9 +78,10 @@ An Express service that downloads two versions of an npm package and compares th
 ### 1. Run the diff service
 
 ```bash
-npm install express pacote diff dotenv
-echo "API_KEY=<a-strong-key>" > .env
-node server.js
+cd npm-diff-service
+npm install
+cp .env.example .env   # then set API_KEY
+npm start
 ```
 
 To generate a strong API key:
@@ -90,7 +90,7 @@ To generate a strong API key:
 openssl rand -hex 32
 ```
 
-The service listens on port `3000`. If n8n runs on a different machine, expose the service through a tunnel (e.g. Cloudflare Tunnel) or a reverse proxy.
+The service listens on port `3000` by default (configurable with `PORT`). It refuses to start without `API_KEY`. If n8n runs on a different machine, expose the service through a tunnel (e.g. Cloudflare Tunnel) or a reverse proxy.
 
 ### 2. Prepare the database
 
@@ -164,9 +164,9 @@ INSERT INTO packages (name) VALUES ('express'), ('lodash'), ('axios');
    - **Postgres**: database connection
    - **DeepSeek**: LLM API key
    - **Telegram**: alert bot and error bot
-   - **Header Auth** (`x-api-key`): the diff service key, used by the `HTTP_DiffAPI` node
+   - **Header Auth**: name `x-api-key`, value = your `API_KEY`; attach it to the `HTTP_DiffAPI` node
 3. In the `loadConfig` node, set `http_tunel` to the `/diff` URL of your diff service.
-4. In the Telegram nodes, replace `chatId` with your own chat ID.
+4. In the `Telegram_SendAlert` and `Telegram_SendError` nodes, replace `YOUR_TELEGRAM_CHAT_ID` with your own chat ID.
 
 ---
 
@@ -192,7 +192,7 @@ INSERT INTO packages (name) VALUES ('express'), ('lodash'), ('axios');
 | `diff` | Two different versions are compared. |
 | `same_version_requested` | Both versions are the same. In this case the integrity check is handled by the workflow. |
 
-The response includes the fields `files_added`, `files_removed`, `files_changed`, `large_files_changed`, `text_files_*`, `binary_files_*` and `package_json_analysis`.
+The `diff` response includes `summary`, `security_signals`, `files_added`, `files_removed`, `files_changed`, `large_files_changed`, `text_files_*`, `binary_files_*` and `package_json_analysis`.
 
 **Error codes:** `400` invalid request · `401` missing or invalid key · `413` limit exceeded · `422` package/version not found or network error · `429` too many concurrent requests
 
@@ -203,6 +203,7 @@ The response includes the fields `files_added`, `files_removed`, `files_changed`
 | Variable | Description |
 |---|---|
 | `API_KEY` | Access key for the diff service (required) |
+| `PORT` | Port the service listens on (optional, default `3000`) |
 
 ---
 
@@ -210,9 +211,11 @@ The response includes the fields `files_added`, `files_removed`, `files_changed`
 
 ```
 .
-├── server.js            # Diff service (Express)
-├── zafiyet_takip.json   # Main n8n workflow
-├── test.json            # Workflow for manually testing a single package
+├── npm-diff-service/
+│   ├── server.js        # Diff service (Express)
+│   ├── package.json
+│   └── .env.example
+├── zafiyet_takip.json   # n8n workflow (credentials removed)
 └── README.md
 ```
 
@@ -223,6 +226,6 @@ The response includes the fields `files_added`, `files_removed`, `files_changed`
 - Only the `latest` dist-tag is tracked. Versions published under tags such as `next` or `beta` are not monitored.
 - The heuristics are regex-based, so advanced obfuscation techniques can bypass them.
 - The LLM evaluation is a supporting signal, not a final verdict. Critical signals should be reviewed manually.
-- No full diff is generated for files larger than 50,000 characters; only the pattern scan result is reported for them.
-- Text/binary classification is based on file extensions and well-known file names.
+- Diffs larger than 50,000 characters are stored on the service but there is no endpoint to fetch them yet; only their pattern scan result reaches the LLM.
+- Text/binary classification relies on file extensions, well-known file names and a content check (NUL bytes / UTF-8 validity), so unusual encodings can be misclassified.
 - Transitive dependencies are not scanned yet.
